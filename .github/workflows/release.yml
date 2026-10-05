@@ -1,0 +1,53 @@
+# Builds the Windows installer and puts it in a DRAFT release.
+# Nobody gets the update until the draft is published on GitHub (Releases → the draft → Publish release).
+name: Build Walter
+
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "What changed (shows up in the release notes)"
+        required: false
+        default: "Fixes and improvements."
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install Tauri CLI
+        run: npm install
+
+      - name: Build the Walter page
+        run: python tools/build.py
+
+      - name: Build installer and draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "Walter v__VERSION__"
+          releaseBody: ${{ inputs.notes }}
+          releaseDraft: true
+          prerelease: false
