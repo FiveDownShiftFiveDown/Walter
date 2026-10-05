@@ -7,7 +7,7 @@ Walter's money module as a Windows app. Data saves automatically to
 
 1. Change `src/walter.html` (the same page as the web version).
 2. Bump `"version"` in `src-tauri/tauri.conf.json` (for example 1.0.0 → 1.0.1).
-3. Push, then run **Actions → Build Walter → Run workflow**.
+3. Push it to the `release` branch (or run **Actions → Build Walter → Run workflow**).
 4. When it finishes, a **draft** release appears under **Releases**. Download the installer from it and try it.
 5. Happy with it? Open the draft and click **Publish release**. Every installed copy sees the update
    within a few hours (or right away from More → Check for updates) and shows an "Install and restart" bar.

@@ -1,10 +1,11 @@
 # Builds the Windows installer and puts it in a DRAFT release.
+# Runs when the 'release' branch is updated, or by hand from the Actions tab.
 # Nobody gets the update until the draft is published on GitHub (Releases → the draft → Publish release).
 name: Build Walter
 
 on:
   push:
-    tags: ["v*"]
+    branches: [release]
   workflow_dispatch:
     inputs:
       notes:
