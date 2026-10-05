@@ -3,6 +3,8 @@
 name: Build Walter
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       notes:
@@ -48,6 +50,6 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "Walter v__VERSION__"
-          releaseBody: ${{ inputs.notes }}
+          releaseBody: ${{ inputs.notes || 'Fixes and improvements.' }}
           releaseDraft: true
           prerelease: false
