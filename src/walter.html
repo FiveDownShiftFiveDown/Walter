@@ -364,6 +364,8 @@ svg.chart .hit{fill:transparent;cursor:pointer}
 .billrow .btn.sm{min-height:34px;padding:0 12px}
 .billrow.paid .bl b{color:var(--muted)}
 .billrow .duesel{height:26px;font-size:12px}
+.billrow .opts{grid-column:2/-1;display:flex;gap:6px;flex-wrap:wrap}
+.billrow .pays{grid-column:2/-1}
 .autot{font:600 10.5px var(--mono);letter-spacing:.04em;text-transform:uppercase;border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:4px;padding:1px 6px;min-height:22px;cursor:pointer}
 .autot[aria-pressed="true"]{background:var(--accent-bg);color:var(--accent);border-color:var(--accent)}
 .diff{font-family:var(--mono);font-weight:600}
@@ -635,7 +637,7 @@ function buildEvents(from, to, opts){
   for (let y = a.getFullYear(), m = a.getMonth(); y < b.getFullYear() || (y === b.getFullYear() && m <= b.getMonth()); m === 11 ? (y++, m = 0) : m++){
     const at = day => iso(new Date(y, m, Math.min(day, dim(y, m))));
     const ymk = y + '-' + String(m + 1).padStart(2, '0');
-    state.bills.forEach(x => { if (x.freq !== 'weekly' && x.due && billAmt(x) > 0) ev.push({date:at(x.due), name:x.name, amt:-billAmt(x), kind:'bill', key:'b:' + x.id + ':' + ymk}); });
+    state.bills.forEach(x => { if (x.freq !== 'weekly' && !x.spread && x.due && billAmt(x) > 0) ev.push({date:at(x.due), name:x.name, amt:-billAmt(x), kind:'bill', key:'b:' + x.id + ':' + ymk}); });
     state.debts.forEach(x => { if (x.due && x.balance > 0 && x.min > 0) ev.push({date:at(x.due), name:x.name + ' payment', amt:-x.min, kind:'debt', key:'d:' + x.id + ':' + ymk}); });
     (state.otherIncome || []).forEach(x => { if (x.day && x.amount > 0) ev.push({date:at(x.day), name:x.name, amt:x.amount, kind:'income'}); });
   }
@@ -675,12 +677,19 @@ function cashflow(sim, c){
   const mv = movesPerCheck(sim, c);
   if (mv > 0) paydaysIn(from, end).forEach(p => ev.push({date:p, name:'Goal & debt moves', amt:-mv, kind:'moves'}));
   const u = undated(); const uDay = from > t ? from : t; const uym = monthKey(t);
-  u.bills.forEach(x => { if (x.freq !== 'weekly') ev.push({date:uDay, name:x.name + ' (no due date)', amt:-billAmt(x), kind:'bill', key:'b:' + x.id + ':' + uym}); });
+  u.bills.forEach(x => { if (x.freq !== 'weekly' && !x.spread) ev.push({date:uDay, name:x.name + ' (no due date)', amt:-billAmt(x), kind:'bill', key:'b:' + x.id + ':' + uym}); });
   u.debts.forEach(x => ev.push({date:uDay, name:x.name + ' payment (no due date)', amt:-x.min, kind:'debt', key:'d:' + x.id + ':' + uym}));
-  const paid = paidMap(); const seen = new Set();
-  ev = ev.reduce((out, e) => { const p = e.key && paid[e.key]; if (!p){ out.push(e); return out; } seen.add(e.key);
-    if (p.date > b.date) out.push(Object.assign({}, e, {date:p.date, amt:-p.amount})); return out; }, []);
-  Object.keys(paid).forEach(k => { const p = paid[k]; if (!seen.has(k) && p.date > b.date && p.date <= end) ev.push({date:p.date, name:p.note, amt:-p.amount, kind:p.bill.kind, key:k}); });
+  const pays = paidAll(); const seen = new Set();
+  ev = ev.reduce((out, e) => { const ps = e.key && pays[e.key]; if (!ps){ out.push(e); return out; } seen.add(e.key);
+    ps.forEach(p => { if (p.date > b.date) out.push(Object.assign({}, e, {date:p.date, amt:-p.amount})); }); return out; }, []);
+  Object.keys(pays).forEach(k => { if (seen.has(k)) return; pays[k].forEach(p => { if (p.date > b.date && p.date <= end) ev.push({date:p.date, name:p.note, amt:-p.amount, kind:p.bill.kind, key:k}); }); });
+  state.bills.forEach(x => { if (!x.spread || x.freq === 'weekly' || !(billAmt(x) > 0)) return;
+    const start = from > t ? from : t;
+    for (let d = start, g = 0; d <= end && g < 400; g++){
+      const ym = monthKey(d), last = iso(new Date(Number(ym.slice(0, 4)), Number(ym.slice(5)) - 1, dim(Number(ym.slice(0, 4)), Number(ym.slice(5)) - 1)));
+      const left = Math.max(0, billAmt(x) - sum(pays['b:' + x.id + ':' + ym] || [], q => q.amount)); const days = daysBetween(d, last) + 1;
+      for (; d <= last && d <= end; d = addDays(d, 1)) if (left > 0) ev.push({date:d, name:x.name, amt:-left / days, kind:'spread'});
+    } });
   ev.sort((p, q) => p.date.localeCompare(q.date) || (q.amt - p.amt));
   const daily = c.everyday * 12 / 365;
   let bal = b.amount, now = b.amount, low = null, lowDate = t, lowWhat = '', spentSince = 0;
@@ -715,22 +724,26 @@ function coverage(n){
 function monthKey(d){ return String(d).slice(0, 7); }
 function spendLog(){ return state.log.filter(x => !x.bill); }
 function paidMap(){ const m = {}; state.log.forEach(x => { if (x.bill && x.bill.key) m[x.bill.key] = x; }); return m; }
+function paidAll(){ const m = {}; state.log.forEach(x => { if (x.bill && x.bill.key) (m[x.bill.key] = m[x.bill.key] || []).push(x); }); Object.values(m).forEach(a => a.sort((p, q) => p.date.localeCompare(q.date))); return m; }
+function withPaid(it, pays){ const ps = pays[it.key] || []; const paidSum = sum(ps, x => x.amount);
+  it.pays = ps; it.paidSum = paidSum; it.last = ps[ps.length - 1] || null; it.remaining = Math.max(0, it.planned - paidSum);
+  it.done = it.spread ? (ps.length > 0 && paidSum >= it.planned) : ps.length > 0; return it; }
 function billItems(ym){
   const y = Number(ym.slice(0, 4)), mi = Number(ym.slice(5, 7)) - 1; const at = day => iso(new Date(y, mi, Math.min(day, dim(y, mi))));
-  const from = ym + '-01', to = at(31); const paid = paidMap(); const out = [];
+  const from = ym + '-01', to = at(31); const paid = paidAll(); const out = [];
   state.bills.forEach(b => { const amt = billAmt(b); const key = 'b:' + b.id + ':' + ym; if (b.freq === 'weekly' || (!(amt > 0) && !paid[key])) return;
-    out.push({key, kind:'bill', id:b.id, list:'bills', name:b.name || 'Bill', planned:amt, due:b.due ? at(b.due) : null, dueDay:b.due || null, auto:!!b.auto}); });
+    out.push({key, kind:'bill', id:b.id, list:'bills', name:b.name || 'Bill', planned:amt, due:b.due && !b.spread ? at(b.due) : null, dueDay:b.due || null, auto:!!b.auto && !b.spread, spread:!!b.spread}); });
   state.debts.forEach(d => { const key = 'd:' + d.id + ':' + ym; if (!((d.balance > 0 && d.min > 0) || paid[key])) return;
     out.push({key, kind:'debt', id:d.id, list:'debts', name:(d.name || 'Debt') + ' minimum', planned:d.min || 0, due:d.due ? at(d.due) : null, dueDay:d.due || null, auto:!!d.auto}); });
   state.yearly.forEach(x => { if (!x.next || !(x.amount > 0)) return; let d = x.next, g = 0; const step = x.every || 12;
     while (d < from && g++ < 200) d = addMonthsISO(d, step);
     if (d <= to) out.push({key:'y:' + x.id + ':' + d, kind:'yearly', id:x.id, list:'yearly', name:x.name || 'Yearly cost', planned:x.amount, due:d, dueDay:null, auto:!!x.auto}); });
-  return out;
+  return out.map(it => withPaid(it, paid));
 }
 function billMonths(){ const ym = monthKey(todayISO()); const prev = monthKey(addMonthsISO(ym + '-01', -1)); return state.billsSince && prev >= state.billsSince ? [prev, ym] : [ym]; }
 /* what's due and not checked off: everything from last month (once tracking covers it), plus this month's bills whose day has come */
-function unpaidDue(){ const t = todayISO(), ym = monthKey(t), paid = paidMap(), out = [];
-  billMonths().forEach(m => billItems(m).forEach(it => { if (paid[it.key]) return; if (m < ym || (it.due && it.due <= t)) out.push(Object.assign({month:m}, it)); }));
+function unpaidDue(){ const t = todayISO(), ym = monthKey(t), out = [];
+  billMonths().forEach(m => billItems(m).forEach(it => { if (it.done) return; if (m < ym || (it.due && it.due <= t)) out.push(Object.assign({month:m}, it)); }));
   return out; }
 function markPaid(it, amount, date, auto){
   state.log.push({id:uid(), date, amount, cat:it.kind === 'debt' ? 'Debt payment' : 'Bills', note:it.name, bill:{key:it.key, kind:it.kind, ref:it.id, due:it.due, planned:it.planned, auto:!!auto}});
@@ -751,49 +764,58 @@ function autoPay(){
   if (!state.setupDone || state.sample) return false;
   const t = todayISO(); let ch = false;
   if (!state.billsSince){ state.billsSince = monthKey(t); ch = true; }
-  const paid = paidMap(), skip = new Set(state.billSkip || []);
-  billMonths().forEach(m => billItems(m).forEach(it => { if (!it.auto || paid[it.key] || skip.has(it.key)) return; const when = it.due || (m + '-01'); if (when > t) return;
-    markPaid(it, it.planned, when, true); paid[it.key] = true; ch = true; }));
+  const skip = new Set(state.billSkip || []);
+  billMonths().forEach(m => billItems(m).forEach(it => { if (!it.auto || it.done || skip.has(it.key)) return; const when = it.due || (m + '-01'); if (when > t) return;
+    markPaid(it, it.planned, when, true); ch = true; }));
   return ch;
 }
 /* a bill that keeps coming in high: three paid months in a row at least 5% over plan */
 function runningHigh(){
   const out = []; const ym = monthKey(todayISO());
-  state.bills.forEach(b => { if (b.freq === 'weekly' || b.split || !(b.amount > 0)) return;
+  state.bills.forEach(b => { if (b.freq === 'weekly' || b.split || b.spread || !(b.amount > 0)) return;
     const ms = []; for (let i = 0; i < 4; i++) ms.push(monthKey(addMonthsISO(ym + '-01', -i)));
     const hits = ms.map(m => state.log.find(x => x.bill && x.bill.key === 'b:' + b.id + ':' + m)).filter(Boolean).slice(0, 3);
     if (hits.length === 3 && hits.every(x => x.amount >= b.amount * 1.05)){ const avg = Math.round(sum(hits, x => x.amount) / 3 / 100) * 100; out.push({b, avg, over:avg - b.amount}); } });
   return out;
 }
 function billsCard(){
-  const t = todayISO(), ym = monthKey(t), paid = paidMap();
-  const items = billItems(ym); const prevLate = billMonths().filter(m => m < ym).reduce((a, m) => a.concat(billItems(m).filter(it => !paid[it.key]).map(it => Object.assign({month:m}, it))), []);
-  const unpaid = prevLate.concat(items.filter(it => !paid[it.key])).map(it => Object.assign({late:!!it.month || (it.due && it.due < t), today:it.due === t}, it));
+  const t = todayISO(), ym = monthKey(t);
+  const items = billItems(ym); const prevLate = billMonths().filter(m => m < ym).reduce((a, m) => a.concat(billItems(m).filter(it => !it.done).map(it => Object.assign({month:m}, it))), []);
+  const unpaid = prevLate.concat(items.filter(it => !it.done)).map(it => Object.assign({late:!!it.month || (it.due && it.due < t), today:it.due === t}, it));
   unpaid.sort((a, b) => (b.late - a.late) || String(a.due || '9999').localeCompare(String(b.due || '9999')));
-  const done = items.filter(it => paid[it.key]).sort((a, b) => paid[b.key].date.localeCompare(paid[a.key].date));
-  const planned = sum(items, x => x.planned), paidAmt = sum(done, x => paid[x.key].amount);
+  const done = items.filter(it => it.done).sort((a, b) => b.last.date.localeCompare(a.last.date));
+  const planned = sum(items, x => x.planned), paidAmt = sum(items, x => x.paidSum);
   const pct = planned > 0 ? Math.min(100, Math.round(paidAmt / planned * 100)) : 0;
   const mname = MONTHS[Number(ym.slice(5)) - 1];
-  const autoBtn = it => `<button type="button" class="autot" data-act="billAuto" data-list="${it.list}" data-id="${it.id}" aria-pressed="${it.auto}" aria-label="Autopay for ${E(it.name)}">Autopay</button>`;
-  const dueTxt = it => it.month ? `<span class="due">${it.due ? 'Was due ' + shortDay(it.due) : MONTHS[Number(it.month.slice(5)) - 1] + ', not checked off'}</span>`
+  const autoBtn = it => (it.list === 'bills' ? `<button type="button" class="autot" data-act="billSpread" data-id="${it.id}" aria-pressed="${!!it.spread}" aria-label="${E(it.name)} is paid in pieces">In pieces</button>` : '')
+    + (it.spread ? '' : `<button type="button" class="autot" data-act="billAuto" data-list="${it.list}" data-id="${it.id}" aria-pressed="${it.auto}" aria-label="Autopay for ${E(it.name)}">Autopay</button>`);
+  const dueTxt = it => it.spread ? `<span${it.month ? ' class="due"' : ''}>${it.month ? MONTHS[Number(it.month.slice(5)) - 1] + ': ' : ''}<b class="num" style="font-weight:600">${money(it.paidSum)}</b> of ${money(it.planned)} paid</span>`
+    : it.month ? `<span class="due">${it.due ? 'Was due ' + shortDay(it.due) : MONTHS[Number(it.month.slice(5)) - 1] + ', not checked off'}</span>`
     : it.due ? `<span class="due">${it.today ? 'Due today' : (it.due < t ? 'Was due ' : 'Due ') + shortDay(it.due)}</span>`
     : (it.list === 'bills' || it.list === 'debts') ? `<span>Due</span>${dueSelect(it.list, it.id, it.dueDay, it.name + ' due day')}` : '';
   const urow = it => `<div class="billrow${it.late ? ' late' : ''}"><span class="ck" aria-hidden="true">${ic('check', 14)}</span>
-    <div class="bl"><b>${E(it.name)}</b><span class="s">${dueTxt(it)}${it.month ? '' : autoBtn(it)}</span></div>
-    ${moneyInput('bp-' + it.key.replace(/[^a-zA-Z0-9]/g, '_'), null, null, it.planned, {label:'Amount paid for ' + it.name})}
-    <button type="button" class="btn sm" data-act="billPaid" data-key="${E(it.key)}" data-month="${E(it.month || ym)}">Paid</button></div>`;
-  const prow = it => { const e = paid[it.key]; const d = e.amount - (e.bill.planned || 0); const armed = ui.confirm === 'unpay-' + e.id;
+    <div class="bl"><b>${E(it.name)}</b><span class="s">${dueTxt(it)}</span></div>
+    ${moneyInput('bp-' + it.key.replace(/[^a-zA-Z0-9]/g, '_'), null, null, it.spread ? null : it.planned, {label:'Amount paid for ' + it.name, ph:it.spread ? mv(it.remaining) : undefined})}
+    <button type="button" class="btn sm" data-act="billPaid" data-key="${E(it.key)}" data-month="${E(it.month || ym)}">${it.spread ? 'Add' : 'Paid'}</button>
+    ${it.spread && it.pays.length ? `<span class="small muted pays">${it.pays.map(x => shortDay(x.date) + ' ' + money(x.amount, true)).join(' · ')}</span>` : ''}
+    ${it.month ? '' : `<span class="opts">${autoBtn(it)}</span>`}</div>`;
+  const prow = it => { if (it.spread) return srow(it); const e = it.last; const d = e.amount - (e.bill.planned || 0); const armed = ui.confirm === 'unpay-' + e.id;
     return `<div class="billrow paid"><span class="ck" aria-hidden="true">${ic('check', 14)}</span>
-    <div class="bl"><b>${E(it.name)}</b><span class="s"><span>${e.bill.auto ? 'Autopaid' : 'Paid'} ${shortDay(e.date)}</span>${Math.abs(d) >= 100 ? `<span class="diff ${d > 0 ? 'up' : 'dn'}">${d > 0 ? '+' : '−'}${money(Math.abs(d)).replace('−', '')} vs plan</span>` : ''}${autoBtn(it)}</span></div>
+    <div class="bl"><b>${E(it.name)}</b><span class="s"><span>${e.bill.auto ? 'Autopaid' : 'Paid'} ${shortDay(e.date)}</span>${Math.abs(d) >= 100 ? `<span class="diff ${d > 0 ? 'up' : 'dn'}">${d > 0 ? '+' : '−'}${money(Math.abs(d)).replace('−', '')} vs plan</span>` : ''}</span></div>
     ${moneyInput('pa-' + e.id, null, null, e.amount, {label:'Amount paid for ' + it.name}).replace('<input ', `<input data-paidamt="${e.id}" `)}
-    <button type="button" class="iconbtn plain${armed ? ' armed' : ''}" data-act="billUndo" data-id="${e.id}" aria-label="${armed ? 'Tap again to mark unpaid' : 'Mark ' + E(it.name) + ' unpaid'}">${ic('x', 16)}</button></div>`; };
+    <button type="button" class="iconbtn plain${armed ? ' armed' : ''}" data-act="billUndo" data-id="${e.id}" aria-label="${armed ? 'Tap again to mark unpaid' : 'Mark ' + E(it.name) + ' unpaid'}">${ic('x', 16)}</button><span class="opts">${autoBtn(it)}</span></div>`; };
+  const srow = it => { const e = it.last; const armed = ui.confirm === 'unpay-' + e.id; const d = it.paidSum - it.planned;
+    return `<div class="billrow paid"><span class="ck" aria-hidden="true">${ic('check', 14)}</span>
+    <div class="bl"><b>${E(it.name)}</b><span class="s"><span>${it.pays.length} payment${it.pays.length > 1 ? 's' : ''}, last ${shortDay(e.date)}</span>${Math.abs(d) >= 100 ? `<span class="diff ${d > 0 ? 'up' : 'dn'}">${d > 0 ? '+' : '−'}${money(Math.abs(d)).replace('−', '')} vs plan</span>` : ''}</span></div>
+    <span class="num" style="grid-column:3;grid-row:2;text-align:right;font-weight:600">${money(it.paidSum, true)}</span>
+    <button type="button" class="iconbtn plain${armed ? ' armed' : ''}" data-act="billUndo" data-id="${e.id}" aria-label="${armed ? 'Tap again to remove the last payment' : 'Remove the last payment toward ' + E(it.name)}">${ic('x', 16)}</button><span class="small muted pays">${it.pays.map(x => shortDay(x.date) + ' ' + money(x.amount, true)).join(' · ')}</span><span class="opts">${autoBtn(it)}</span></div>`; };
   const high = runningHigh();
   return `<div class="card"><div class="split-line"><span style="font-weight:700;font-size:16px">Bills · ${mname}</span><span class="v num" style="font-weight:600">${money(paidAmt)} <span class="muted small" style="font-weight:500">of ${money(planned)} paid</span></span></div>
     <div class="bar thin"><i style="width:${pct}%"></i></div>
     ${unpaid.length ? `<div>${unpaid.map(urow).join('')}</div>` : `<p class="small" style="color:var(--save);font-weight:600">${items.length ? 'Everything due this month is paid.' : 'No bills set up yet. Add them on the Plan tab.'}</p>`}
     ${done.length ? `<details class="paidlist" ${ui.open.paidlist ? 'open' : ''} data-pl="1"><summary><span>${done.length} paid this month</span>${ic('down', 16).replace('<svg', '<svg class="chev"')}</summary>${done.map(prow).join('')}</details>` : ''}
     ${high.map(h => `<div class="note warn">${ic('trend', 16)}<span style="flex:1">${E(h.b.name)} has come in about ${money(h.over)} over plan three months running.</span><button type="button" class="btn ghost" style="min-height:28px;padding:0" data-act="billRaise" data-id="${h.b.id}" data-v="${h.avg}">Plan ${money(h.avg)}</button></div>`).join('')}
-    <p class="hint">Change the amount before tapping Paid if it came in different. Autopay bills check themselves off on their due day.</p></div>`;
+    <p class="hint">Change the amount before tapping Paid if it came in different. Autopay bills check themselves off on their due day. Bills paid "in pieces" take as many payments as you make, and Safe to spend spreads what's left across the rest of the month.</p></div>`;
 }
 
 /* ---------- sample data ---------- */
@@ -1743,7 +1765,7 @@ function modalView(){
     <div class="card">${sec('Your paycheck')}
       <div class="split-line"><span>Take-home this check</span><div style="width:150px">${moneyInput('ci-pay', null, null, c.base, {label:'Paycheck amount'})}</div></div>
       <div class="field"><label for="ci-extra" class="hint">If it came in above ${money(c.base)}, put the extra toward</label><select id="ci-extra" class="inp">${opts.map(([v, l]) => `<option value="${E(v)}" ${v === tgt ? 'selected' : ''}>${E(l)}</option>`).join('')}</select></div></div>
-    ${late.length ? `<div class="card">${sec('Bills that were due')}<p class="hint">Tick what went through. Each one is logged at its planned amount; change it later under Log if it came in different.</p>${late.map(x => `<label class="checkline" for="ci-b-${E(x.key)}"><input id="ci-b-${E(x.key)}" type="checkbox" data-cibill="${E(x.key)}" data-month="${E(x.month)}" checked><span>${E(x.name)} <span class="muted num small">${money(x.planned)}${x.due ? ' · ' + shortDay(x.due) : ''}</span></span></label>`).join('')}</div>` : ''}
+    ${late.length ? `<div class="card">${sec('Bills that were due')}<p class="hint">Tick what went through. Each one is logged at its planned amount; change it later under Log if it came in different.</p>${late.map(x => `<label class="checkline" for="ci-b-${E(x.key)}"><input id="ci-b-${E(x.key)}" type="checkbox" data-cibill="${E(x.key)}" data-month="${E(x.month)}" checked><span>${E(x.name)} <span class="muted num small">${money(x.spread ? x.remaining : x.planned)}${x.spread ? ' left' : ''}${x.due ? ' · ' + shortDay(x.due) : ''}</span></span></label>`).join('')}</div>` : ''}
     ${activeGoals.length ? `<div class="card">${sec('Moved to goals')}${activeGoals.map(g => { const r = sim.G[g.id]; return `<div class="split-line"><label for="ci-g-${g.id}" style="font-weight:600">${E(g.name)}</label><div style="width:150px">${moneyInput('ci-g-' + g.id, null, null, perCheck(r.alloc0, c), {label:'Moved to ' + g.name})}</div></div>`; }).join('')}</div>` : ''}
     ${debts.length ? `<div class="card">${sec('Debt payments')}<p class="hint">Anything you paid on top of the minimum. Minimums you check off under Bills are already taken off the balance.</p>${debts.map(d => { const ex = sim.D[d.id] ? sim.D[d.id].extra0 : 0; const def = perCheck(ex, c); return `<div class="split-line"><label for="ci-d-${d.id}" style="font-weight:600">${E(d.name)}</label><div style="width:150px">${moneyInput('ci-d-' + d.id, null, null, def, {label:'Paid on ' + d.name})}</div></div>`; }).join('')}</div>` : ''}
     ${openIn.length ? `<div class="card">${sec('Paid back?')}${openIn.map(o => `<label class="checkline" for="ci-o-${o.id}"><input id="ci-o-${o.id}" type="checkbox"><span>${E(o.person)} paid back ${money(o.amount, true)}${o.note ? ' · ' + E(o.note) : ''}</span></label>`).join('')}</div>` : ''}
@@ -1780,7 +1802,7 @@ function saveCheckin(){
   const debtPay = {};
   state.goals.forEach(g => { const el = document.getElementById('ci-g-' + g.id); if (el){ const a = parseMoney(el.value) || 0; if (a){ g.saved = (g.saved || 0) + a; g.checkins = (g.checkins || []).concat([{date:t, value:a}]); } } });
   state.debts.forEach(d => { const el = document.getElementById('ci-d-' + d.id); if (el) debtPay[d.id] = parseMoney(el.value) || 0; });
-  document.querySelectorAll('[data-cibill]').forEach(el => { if (!el.checked) return; const it = billItems(el.dataset.month).find(x => x.key === el.dataset.cibill); if (it && !paidMap()[it.key]) markPaid(it, it.planned, it.due && it.due <= t ? it.due : t, false); });
+  document.querySelectorAll('[data-cibill]').forEach(el => { if (!el.checked) return; const it = billItems(el.dataset.month).find(x => x.key === el.dataset.cibill); if (it && !it.done) markPaid(it, it.spread ? it.remaining : it.planned, it.due && it.due <= t ? it.due : t, false); });
   let note = '';
   if (extra > 0 && extraTo !== 'keep'){
     if (extraTo === 'DEBTS'){ const sim = simulate(); if (sim.targetDebt){ debtPay[sim.targetDebt] = (debtPay[sim.targetDebt] || 0) + extra; note = `Extra ${money(extra)} went toward ${state.debts.find(d => d.id === sim.targetDebt).name}.`; } }
@@ -1891,9 +1913,13 @@ const ACT = {
   delLog: el => armOrRun('log-' + el.dataset.id, () => { const e = state.log.find(x => x.id === el.dataset.id); if (e && e.bill) unmarkPaid(e); else state.log = state.log.filter(x => x.id !== el.dataset.id); save(); render(); toast(e && e.bill ? e.note + ' marked unpaid' : 'Entry deleted'); }),
   billPaid: el => { const it = billItems(el.dataset.month).find(x => x.key === el.dataset.key); if (!it) return;
     const inp = document.getElementById('bp-' + it.key.replace(/[^a-zA-Z0-9]/g, '_')); const a = inp ? parseMoney(inp.value) : it.planned;
-    if (a == null || a < 0){ if (inp) inp.focus(); toast('Enter what you paid'); return; }
-    const t = todayISO(); markPaid(it, a, it.due && it.due <= t ? it.due : t, false); save(); render();
-    toast(it.name + ' paid · ' + money(a, true)); },
+    if (a == null || a <= 0){ if (inp) inp.focus(); toast(it.spread ? 'Enter how much you paid this time' : 'Enter what you paid'); return; }
+    const t = todayISO(); const late = el.dataset.month < monthKey(t);
+    markPaid(it, a, it.spread ? (late ? iso(new Date(Number(el.dataset.month.slice(0, 4)), Number(el.dataset.month.slice(5)), 0)) : t) : (it.due && it.due <= t ? it.due : t), false); save(); render();
+    const left = it.spread ? it.remaining - a : 0;
+    toast(it.spread ? (left > 0 ? money(a, true) + ' toward ' + it.name + ' · ' + money(left) + ' left' : it.name + ' paid in full for the month') : it.name + ' paid · ' + money(a, true)); },
+  billSpread: el => { const b = state.bills.find(x => x.id === el.dataset.id); if (!b) return; b.spread = !b.spread; if (b.spread) b.auto = false; save(); render();
+    toast(b.spread ? (b.name || 'Bill') + ': log each payment as you make it' : (b.name || 'Bill') + ' is one payment a month again'); },
   billUndo: el => armOrRun('unpay-' + el.dataset.id, () => { const e = state.log.find(x => x.id === el.dataset.id); if (!e) return; unmarkPaid(e); save(); render(); toast(e.note + ' marked unpaid'); }),
   billAuto: el => { const x = (state[el.dataset.list] || []).find(r => r.id === el.dataset.id); if (!x) return; x.auto = !x.auto; save(); render();
     toast(x.auto ? (x.name || 'Bill') + ' is on autopay' + ((el.dataset.list === 'yearly' || x.due) ? '' : '. It checks off on the 1st until you set a due day') : 'Autopay off for ' + (x.name || 'this bill')); },
