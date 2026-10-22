@@ -364,6 +364,12 @@ svg.chart .hit{fill:transparent;cursor:pointer}
 .billrow .btn.sm{min-height:34px;padding:0 12px}
 .billrow.paid .bl b{color:var(--muted)}
 .billrow .duesel{height:26px;font-size:12px}
+.catrow .meta{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;font-size:12px;color:var(--muted)}
+.catrow .meta .in{color:var(--save);font-weight:600} .catrow .meta .out{color:var(--est);font-weight:600}
+.coverbox{display:flex;flex-direction:column;gap:6px;padding:8px 10px;border-radius:8px;background:var(--panel-2);margin-top:2px}
+.coverbox .chips .chip{min-height:30px;font-size:13px;padding:0 10px}
+.movelist{display:flex;flex-direction:column}
+.movelist .mv{display:grid;grid-template-columns:1fr auto 36px;gap:8px;align-items:center;font-size:13px;padding:2px 0}
 .billrow .opts{grid-column:2/-1;display:flex;gap:6px;flex-wrap:wrap}
 .billrow .pays{grid-column:2/-1}
 .autot{font:600 10.5px var(--mono);letter-spacing:.04em;text-transform:uppercase;border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:4px;padding:1px 6px;min-height:22px;cursor:pointer}
@@ -450,7 +456,7 @@ function migrate(o){
   const d = defaultState();
   const s = Object.assign(d, o || {});
   s.pay = Object.assign(defaultState().pay, (o && o.pay) || {});
-  ['bills','everyday','yearly','debts','goals','order','log','owed','checkins','otherIncome','people','vehicles','snapshots','billSkip'].forEach(k => { if (!Array.isArray(s[k])) s[k] = []; });
+  ['bills','everyday','yearly','debts','goals','order','log','owed','checkins','otherIncome','people','vehicles','snapshots','billSkip','moves'].forEach(k => { if (!Array.isArray(s[k])) s[k] = []; });
   if (!s.setup) s.setup = {path:'quick', step:-1};
   if (!s.veh) s.veh = {fuelSync:false, maintOn:false};
   s.schema = 1;
@@ -1146,15 +1152,29 @@ function todayView(){
       <button type="button" class="btn sm secondary" data-act="tab" data-v="log">${ic('plus', 16)}<span>Log spending</span></button></div>
     ${openOwed.length ? `<div class="card"><span class="eyebrow">Owed</span>${owedIn ? `<div class="kv"><span>Owed to you</span><span class="v" style="color:var(--save)">${money(owedIn)}</span></div>` : ''}${owedOut ? `<div class="kv"><span>You owe</span><span class="v">${money(owedOut)}</span></div>` : ''}<button type="button" class="btn ghost" style="align-self:flex-start;padding:0" data-act="tab" data-v="more">See who</button></div>` : ''}`;
 }
+/* ---------- pay-period budgets ----------
+   Each category gets its share of the monthly plan every pay period. Money can be moved between categories inside a
+   pay period (state.moves), and a category set to bank its leftovers (e.roll) carries what it didn't spend, or what it
+   overspent, into the next period. */
+function movedFor(id, period){ const mv = (state.moves || []).filter(m => m.period === period); return sum(mv.filter(m => m.to === id), m => m.amount) - sum(mv.filter(m => m.from === id), m => m.amount); }
+function catSpent(name, w, lg){ return sum(lg.filter(x => x.cat === name && x.date >= w.last && x.date < w.next), x => x.amount); }
+function banked(e, period, c, lg){
+  if (!e.roll || !e.rollSince || e.rollSince >= period) return 0;
+  c = c || calc(); lg = lg || spendLog(); const base = perCheck(effAmount(e), c); let p = e.rollSince, tot = 0, g = 0;
+  while (p < period && g++ < 260){ const w = payWindow(p); tot += base + movedFor(e.id, w.last) - catSpent(e.name, w, lg); p = w.next; }
+  return tot;
+}
 function periodSpend(w){
-  const c = calc();
-  const entries = spendLog().filter(e => e.date >= w.last && e.date < w.next);
-  const cats = state.everyday.map(e => ({name:e.name, budget:perCheck(effAmount(e), c), cut:!!e.cut, spent:sum(entries.filter(x => x.cat === e.name), x => x.amount)}));
+  const c = calc(), lg = spendLog();
+  const entries = lg.filter(e => e.date >= w.last && e.date < w.next);
+  const cats = state.everyday.map(e => { const base = perCheck(effAmount(e), c), moved = movedFor(e.id, w.last), bank = banked(e, w.last, c, lg);
+    return {id:e.id, name:e.name, base, moved, bank, roll:!!e.roll, budget:base + moved + bank, cut:!!e.cut, spent:sum(entries.filter(x => x.cat === e.name), x => x.amount)}; });
   const known = new Set(state.everyday.map(e => e.name));
-  const other = sum(entries.filter(x => !known.has(x.cat)), x => x.amount);
-  if (other) cats.push({name:'Other', budget:0, spent:other});
+  const other = sum(entries.filter(x => !known.has(x.cat)), x => x.amount), otherMoved = movedFor('OTHER', w.last);
+  if (other || otherMoved) cats.push({id:'OTHER', name:'Other', base:0, moved:otherMoved, bank:0, budget:otherMoved, spent:other});
   return {entries, cats, spent:sum(entries, x => x.amount), budget:sum(cats, x => x.budget)};
 }
+function catName(id){ if (id === 'OTHER') return 'Other'; const e = state.everyday.find(x => x.id === id); return e ? e.name : 'a deleted category'; }
 function logView(){
   const w = payWindow(), c = calc(), sim = simulate(state, c), per = periodSpend(w);
   const cats = state.everyday.map(e => e.name).filter(Boolean).concat(['Other']);
@@ -1178,11 +1198,34 @@ function logView(){
     ${billsCard()}
     ${logChart(c)}
     <div class="card"><div class="kv"><span style="font-weight:700;font-size:16px">This pay period</span><span class="v" style="font-size:17px">${money(per.spent)} <span class="muted small" style="font-weight:500">of ${money(per.budget)}</span></span></div>
-      <div>${per.cats.map(x => { const pct = x.budget > 0 ? Math.min(100, Math.round(x.spent / x.budget * 100)) : (x.spent ? 100 : 0); const ov = x.spent > x.budget;
-        return `<div class="catrow"><div class="kv"><span style="font-weight:600">${E(x.name)}${x.cut ? ' <span class="tag info">Cutting back</span>' : ''}</span><span class="v">${money(x.spent)} <span class="muted" style="font-weight:500">/ ${money(x.budget)}</span></span></div><div class="bar thin"><i class="${ov ? 'over' : ''}" style="width:${pct}%"></i></div>${ov ? `<span class="small" style="color:var(--est);font-weight:600">${money(x.spent - x.budget)} over</span>` : ''}</div>`; }).join('') || '<p class="muted small">Add spending categories on the Plan tab.</p>'}</div></div>
+      <div>${per.cats.map(x => catRow(x, per)).join('') || '<p class="muted small">Add spending categories on the Plan tab.</p>'}</div>
+      ${moveBlock(per, w)}</div>
     ${effect}
     <div class="card"><div class="split-line"><span style="font-weight:700;font-size:16px">${ui.showAllLog ? 'All entries' : 'This pay period'}</span><button type="button" class="btn ghost" style="padding:0" data-act="toggleAllLog">${ui.showAllLog ? 'This period only' : 'Show everything'}</button></div>
       <div class="entries">${list.length ? list.map(e => { const armed = ui.confirm === 'log-' + e.id; return `<div class="entry"><span class="d">${shortDay(e.date)}</span><span>${e.bill ? ic('check', 13).replace('<svg', '<svg style="color:var(--save);vertical-align:-2px;margin-right:3px"') : ''}${E(e.note || e.cat)}${e.note ? `<span class="c">${E(e.cat)}${e.bill && e.bill.auto ? ' · autopay' : ''}</span>` : ''}</span><span class="a">${money(e.amount, true)}</span><button type="button" class="iconbtn plain${armed ? ' armed' : ''}" data-act="delLog" data-id="${e.id}" aria-label="${armed ? 'Tap again to delete' : 'Delete entry'}">${ic('x', 16)}</button></div>`; }).join('') : '<p class="muted small" style="padding:6px 0">Nothing logged yet. Every coffee counts.</p>'}</div></div>`;
+}
+function catRow(x, per){
+  const pct = x.budget > 0 ? Math.min(100, Math.round(x.spent / x.budget * 100)) : (x.spent ? 100 : 0); const left = x.budget - x.spent; const ov = left < 0;
+  const meta = [];
+  if (x.bank) meta.push(`<span class="${x.bank > 0 ? 'in' : 'out'}">${x.bank > 0 ? money(x.bank) + ' banked' : money(-x.bank) + ' overspent last time'}</span>`);
+  if (x.moved) meta.push(`<span class="${x.moved > 0 ? 'in' : 'out'}">${x.moved > 0 ? '+' : '−'}${money(Math.abs(x.moved)).replace('−', '')} moved ${x.moved > 0 ? 'in' : 'out'}</span>`);
+  if (!ov && left > 0 && x.spent) meta.push(`<span>${money(left)} left</span>`);
+  const covering = ui.cover === x.id;
+  const sources = per.cats.filter(y => y.id !== x.id && y.budget - y.spent > 0);
+  return `<div class="catrow"><div class="kv"><span style="font-weight:600">${E(x.name)}${x.cut ? ' <span class="tag info">Cutting back</span>' : ''}</span><span class="v">${money(x.spent)} <span class="muted" style="font-weight:500">/ ${money(x.budget)}</span></span></div>
+    <div class="bar thin"><i class="${ov ? 'over' : ''}" style="width:${pct}%"></i></div>
+    <div class="meta">${ov ? `<span class="out">${money(-left)} over</span><button type="button" class="btn ghost" style="min-height:24px;padding:0;font-size:12.5px" data-act="coverOpen" data-id="${x.id}" aria-expanded="${covering}">Cover it</button>` : ''}${meta.join('')}
+      ${x.id !== 'OTHER' ? `<button type="button" class="autot" style="margin-left:auto" data-act="rollToggle" data-id="${x.id}" aria-pressed="${!!x.roll}" title="Carry what's left (or what's overspent) into the next pay period">Bank leftovers</button>` : ''}</div>
+    ${covering ? `<div class="coverbox"><span class="small" style="font-weight:600">Take ${money(-left)} from:</span>${sources.length ? `<div class="chips">${sources.map(y => `<button type="button" class="chip" data-act="coverFrom" data-from="${y.id}" data-to="${x.id}" data-v="${Math.min(-left, y.budget - y.spent)}">${E(y.name)} <span class="muted num">${money(y.budget - y.spent)} left</span></button>`).join('')}</div>` : '<span class="small muted">No other category has money left this pay period.</span>'}</div>` : ''}</div>`;
+}
+function moveBlock(per, w){
+  const mv = (state.moves || []).filter(m => m.period === w.last);
+  const opts = per.cats.map(x => `<option value="${x.id}">${E(x.name)}</option>`).join('');
+  return `${mv.length ? `<div class="movelist"><span class="eyebrow" style="padding-top:4px">Moved this pay period</span>${mv.map(m => `<div class="mv"><span>${E(catName(m.from))} → ${E(catName(m.to))}</span><span class="num" style="font-weight:600">${money(m.amount, true)}</span><button type="button" class="iconbtn plain" data-act="moveUndo" data-id="${m.id}" aria-label="Undo this move">${ic('x', 14)}</button></div>`).join('')}</div>` : ''}
+    <details class="paidlist" data-mv="1" ${ui.open.moveMoney ? 'open' : ''}><summary><span>Move money between categories</span>${ic('down', 16).replace('<svg', '<svg class="chev"')}</summary>
+      <div class="stack tight"><div class="pair"><div class="field"><label class="hint" for="mvFrom">From</label><select id="mvFrom" class="inp">${opts}</select></div><div class="field"><label class="hint" for="mvTo">To</label><select id="mvTo" class="inp">${per.cats.map((x, i) => `<option value="${x.id}" ${i === 1 ? 'selected' : ''}>${E(x.name)}</option>`).join('')}</select></div></div>
+        <div class="split-line" style="gap:8px"><div style="flex:1;min-width:0">${moneyInput('mvAmt', null, null, null, {label:'Amount to move'})}</div><button type="button" class="btn sm" data-act="moveMoney">Move</button></div>
+        <span class="hint">Planning a nice dinner? Move it from groceries first. It only changes this pay period.</span></div></details>`;
 }
 function payRhythm(){
   const f = state.pay.freq, a = state.pay.nextPayday ? parseISO(state.pay.nextPayday) : null;
@@ -1918,6 +1961,17 @@ const ACT = {
     markPaid(it, a, it.spread ? (late ? iso(new Date(Number(el.dataset.month.slice(0, 4)), Number(el.dataset.month.slice(5)), 0)) : t) : (it.due && it.due <= t ? it.due : t), false); save(); render();
     const left = it.spread ? it.remaining - a : 0;
     toast(it.spread ? (left > 0 ? money(a, true) + ' toward ' + it.name + ' · ' + money(left) + ' left' : it.name + ' paid in full for the month') : it.name + ' paid · ' + money(a, true)); },
+  coverOpen: el => { ui.cover = ui.cover === el.dataset.id ? null : el.dataset.id; render(); },
+  coverFrom: el => { const a = Number(el.dataset.v); if (!(a > 0)) return; const w = payWindow();
+    state.moves = (state.moves || []).concat([{id:uid(), period:w.last, from:el.dataset.from, to:el.dataset.to, amount:a, date:todayISO()}]); ui.cover = null; save(); render();
+    const x = periodSpend(w).cats.find(c => c.id === el.dataset.to); const still = x ? x.spent - x.budget : 0;
+    toast(still > 0 ? `Moved ${money(a, true)} from ${catName(el.dataset.from)}. Still ${money(still)} over.` : `Covered from ${catName(el.dataset.from)}`); },
+  moveMoney: () => { const f = document.getElementById('mvFrom').value, t = document.getElementById('mvTo').value, a = parseMoney(document.getElementById('mvAmt').value);
+    if (f === t){ toast('Pick two different categories'); return; } if (!a || a <= 0){ document.getElementById('mvAmt').focus(); toast('Enter an amount'); return; }
+    state.moves = (state.moves || []).concat([{id:uid(), period:payWindow().last, from:f, to:t, amount:a, date:todayISO()}]); save(); render(); toast(`${money(a, true)} moved to ${catName(t)}`); },
+  moveUndo: el => { state.moves = (state.moves || []).filter(m => m.id !== el.dataset.id); save(); render(); toast('Move undone'); },
+  rollToggle: el => { const e = state.everyday.find(x => x.id === el.dataset.id); if (!e) return; e.roll = !e.roll; if (e.roll) e.rollSince = payWindow().last; else e.rollSince = null; save(); render();
+    toast(e.roll ? e.name + ' now banks what it doesn\'t spend, starting this pay period' : e.name + ' starts fresh each pay period'); },
   billSpread: el => { const b = state.bills.find(x => x.id === el.dataset.id); if (!b) return; b.spread = !b.spread; if (b.spread) b.auto = false; save(); render();
     toast(b.spread ? (b.name || 'Bill') + ': log each payment as you make it' : (b.name || 'Bill') + ' is one payment a month again'); },
   billUndo: el => armOrRun('unpay-' + el.dataset.id, () => { const e = state.log.find(x => x.id === el.dataset.id); if (!e) return; unmarkPaid(e); save(); render(); toast(e.note + ' marked unpaid'); }),
@@ -2094,7 +2148,7 @@ document.addEventListener('focusout', e => {
   const t = e.target;
   if (t && t.tagName === 'INPUT' && t.closest && t.closest('.money')){ const v = parseMoney(t.value); if (v != null) t.value = mv(v); }
   setTimeout(() => { const a = document.activeElement; const editing = a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName); if (dirty && !editing && state.setupDone && !ui.modal){ dirty = false; render(); } }, 60); });
-document.addEventListener('toggle', e => { const d = e.target; if (d.matches && d.matches('details.sec')) ui.open[d.dataset.sec] = d.open; if (d.matches && d.matches('details.paidlist')) ui.open.paidlist = d.open; }, true);
+document.addEventListener('toggle', e => { const d = e.target; if (d.matches && d.matches('details.sec')) ui.open[d.dataset.sec] = d.open; if (d.matches && d.matches('details.paidlist')){ if (d.dataset.mv) ui.open.moveMoney = d.open; else ui.open.paidlist = d.open; } }, true);
 document.addEventListener('submit', e => {
   e.preventDefault();
   const f = e.target;
